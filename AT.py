@@ -118,8 +118,8 @@ def connect_to_network(port, max_retries=3):
                 
                 # 1. 配置 PDP 上下文 (以中国联通 UNINET 为例，可根据实际修改)
                 print("步骤 1: 配置 PDP 上下文 (AT+QICSGP)...")
-                ser.write(b'AT+QICSGP=1,1,"UNINET","",0\r\n')
-                time.sleep(1)
+                ser.write(b'AT+QICSGP=1,1,"UNINET","","",0\r\n')
+                time.sleep(10)  # 等待网络响应
                 res1 = ser.read_all().decode('utf-8', errors='ignore')
                 print(res1)
                 if 'OK' not in res1:
@@ -163,7 +163,7 @@ def connect_to_network(port, max_retries=3):
                 # 参数说明: contextID=1, connectID=0, service_type="TCP", address="220.180.239.212"(示例IP), port=80, local_port=0, access_mode=0(缓存模式)
                 print("步骤 4: 打开 Socket 连接 (AT+QIOPEN)...")
                 ser.reset_input_buffer()
-                ser.write(b'AT+QIOPEN=1,0,"TCP","47.110.132.201",22,0,0\r\n')
+                ser.write(b'AT+QIOPEN=1,0,"TCP","132op030099cv.vicp.fun",11773,0,0\r\n')
                 
                 qiopen_success = False
                 start_time = time.time()
@@ -207,10 +207,89 @@ def connect_to_network(port, max_retries=3):
     return False
 
 
+def send_data_via_qisend(port, data, connect_id=0, timeout=10):
+    """
+    在已建立的 Socket 连接上，通过 AT+QISEND 发送数据。
+    
+    :param port: 串口设备，如 '/dev/ttyUSB0'
+    :param data: 要发送的数据（bytes 或 str）
+    :param connect_id: Socket 连接 ID，默认 0（AT+QIOPEN 时使用的）
+    :param timeout: 整体超时秒数
+    :return: True 成功收到 SEND OK，False 失败
+    """
+    if isinstance(data, str):
+        data = data.encode('utf-8')
+
+    if not data:
+        print("❌ 数据为空，AT+QISEND 会返回 SEND FAIL")
+        return False
+
+    try:
+        with serial.Serial(port, baudrate=115200, timeout=1) as ser:
+            ser.reset_input_buffer()
+
+            # 1. 发送定长数据命令，等待 '>' 提示符
+            cmd = f'AT+QISEND={connect_id},{len(data)}\r\n'.encode()
+            print(f'📤 发送命令: {cmd.decode().strip()}')
+            ser.write(cmd)
+
+            start = time.time()
+            prompt_received = False
+            buffer = b''
+
+            while time.time() - start < timeout:
+                if ser.in_waiting > 0:
+                    chunk = ser.read(ser.in_waiting)
+                    buffer += chunk
+                    # 注意：'>' 提示符可能单独出现，也可能和其他回显混在一起
+                    if b'>' in buffer:
+                        prompt_received = True
+                        print('✅ 收到 ">" 提示符，准备发送数据')
+                        break
+                time.sleep(0.05)
+
+            if not prompt_received:
+                print(f'❌ 超时未收到 ">" 提示符，模块原始响应: {buffer!r}')
+                return False
+
+            # 2. 发送原始数据（不要额外加 \r\n）
+            print(f'📨 发送数据 ({len(data)} bytes): {data!r}')
+            ser.write(data)
+
+            # 3. 等待 SEND OK 或 SEND FAIL / ERROR
+            result_buffer = b''
+            start = time.time()
+
+            while time.time() - start < timeout:
+                if ser.in_waiting > 0:
+                    chunk = ser.read(ser.in_waiting)
+                    result_buffer += chunk
+                    text = result_buffer.decode('utf-8', errors='ignore')
+
+                    if 'SEND OK' in text:
+                        print('🎉 收到 SEND OK，数据已交给模块发送')
+                        return True
+                    elif 'SEND FAIL' in text:
+                        print(f'⚠️ 收到 SEND FAIL，发送缓存可能已满: {text!r}')
+                        return False
+                    elif 'ERROR' in text:
+                        print(f'❌ 收到 ERROR，连接可能已断开或参数有误: {text!r}')
+                        return False
+                time.sleep(0.05)
+
+            print(f'❌ 超时未收到 SEND OK/SEND FAIL/ERROR，原始响应: {result_buffer!r}')
+            return False
+
+    except Exception as e:
+        print(f'⚠️ 发送数据时出错: {e}')
+        return False
+
+
 if __name__ == '__main__':
     # 如果提示权限不足，请使用 sudo 运行脚本
     found_port = find_at_port()
     if found_port:
         print(f"\n🎉 最终锁定的可用 AT 串口为: {found_port}")
         connect_to_network(found_port)
+        send_data_via_qisend(found_port, "Hello, World!")
 #运行代码sudo python3 AT.py
